@@ -110,4 +110,88 @@ class UdpTelemetryNode(Node):
         else:
             if addr != self.authorized_addr:
                 self.get_logger().warn(
-                    f"HELLO desde {addr} pero ya hay PC emparejada: {self.authorized
+                    f"HELLO desde {addr} pero ya hay PC emparejada: {self.authorized_addr}"
+                )
+                return
+
+        # Responder ACK <domain_id> <robot_name>
+        ack_msg = f"ACK {self.ros_domain_id} {self.robot_name}".encode("utf-8")
+        self.sock.sendto(ack_msg, addr)
+
+    # ================== Callbacks de sensores ==================
+    def scan_callback(self, msg: LaserScan):
+        if self.authorized_addr is None:
+            return  # aún no hay PC emparejada
+
+        # OJO: esto puede ser pesado si lo mandas a full rate; puedes muestrear
+        # Formato:
+        # SCAN <domain_id> <robot_name> <stamp_sec> <stamp_nsec> <angle_min> <angle_increment> <n> r1 r2 ... rn
+        ranges = list(msg.ranges)
+        n = len(ranges)
+
+        header = (
+            f"SCAN {self.ros_domain_id} {self.robot_name} "
+            f"{msg.header.stamp.sec} {msg.header.stamp.nanosec} "
+            f"{msg.angle_min} {msg.angle_increment} {n}"
+        )
+        # Convertir lista de floats a texto
+        ranges_str = " ".join(f"{r:.3f}" for r in ranges)
+
+        text = f"{header} {ranges_str}"
+        data = text.encode("utf-8")
+
+        try:
+            self.sock.sendto(data, self.authorized_addr)
+        except Exception as e:
+            self.get_logger().error(f"Error enviando SCAN a {self.authorized_addr}: {e}")
+
+    def image_callback(self, msg: Image):
+        if self.authorized_addr is None:
+            return
+
+        try:
+            # Convertir a OpenCV y codificar a JPEG
+            cv_img = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+            ok, jpeg = cv2.imencode(".jpg", cv_img)
+            if not ok:
+                return
+
+            b64 = base64.b64encode(jpeg.tobytes()).decode("ascii")
+
+            # Formato:
+            # IMG <domain_id> <robot_name> <stamp_sec> <stamp_nsec> <base64_jpeg>
+            header = (
+                f"IMG {self.ros_domain_id} {self.robot_name} "
+                f"{msg.header.stamp.sec} {msg.header.stamp.nanosec}"
+            )
+            text = f"{header} {b64}"
+            data = text.encode("utf-8")
+
+            self.sock.sendto(data, self.authorized_addr)
+
+        except Exception as e:
+            self.get_logger().error(f"Error en image_callback: {e}")
+
+    # ================== Cleanup ==================
+    def destroy_node(self):
+        self.running = False
+        try:
+            self.sock.close()
+        except Exception:
+            pass
+        super().destroy_node()
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = UdpTelemetryNode()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    node.destroy_node()
+    rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    main()
